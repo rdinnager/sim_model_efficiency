@@ -224,7 +224,8 @@ test_nimble <- GoL_nimble(nimble_lattice, 100, nrow(nimble_lattice), ncol(nimble
 
 GoL_nimble_cmp <- compileNimble(test_nimble, showCompilerOutput = TRUE)
 
-GoL_nimble_cmp$run()
+timed_nimble <- system.time(GoL_nimble_cmp$run())
+timed_nimble
 
 write.gif(GoL_nimble_cmp$storage, "test_nimble.gif", col="jet", delay=5)
 
