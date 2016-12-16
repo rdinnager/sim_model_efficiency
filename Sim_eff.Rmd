@@ -199,12 +199,12 @@ GoL_nimble <- nimbleFunction(
             if(lattice[i, j] == 1) {
               if(neighbours < 2 | neighbours > 3) {
                 updated_lattice[i, j] <- 0  
-              } else {
+              } 
+            } else {
                 if(neighbours == 3) {
                   updated_lattice[i, j] <- 1
                 }
               }
-            } 
               
               #ifelse(lattice[i, j] == 1,
               #                              ifelse(neighbours < 2 | neighbours > 3, 0, 1),
