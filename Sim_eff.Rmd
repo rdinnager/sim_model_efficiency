@@ -1,0 +1,231 @@
+---
+title: "Testing Simulation Efficiency Methods"
+author: "Russell Dinnage"
+date: "16 December 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caTools)
+```
+
+In this post I am going to look at how we can run fairly simple simulations in R with high efficiency. Though many individual-based simulation models might be simple, they can still take ages to run in R because of it is an interpretted language. In particular loops are notoriously slow in R. SO what option are there to help speed things up? That is, options besides 'rewrite your simulation in C++', which is simply not feasible for most of us, and often not worth the effort. Can we get close to the speedup of a C++ rewrite in R? I will explore this question by using one of the simplest simulation models out there, Conway's Game of Life (GoL).
+
+Conway's GoL is a simple cellular automata, interesting for its ability to create mesmerizing and complex-looking patterns despite its simple set of rules. It is a good model to do tests on it, because slightly more complicated but similar sets of rules can lead to very useful models in ecology and evolution (e.g. grid-based spatial models). GoL is setup on a square grid. Each grid cell can take a value of 0 or 1. If we consider a cell with a one 'alive', and a cell with a zero 'dead', then each round of the simulation each cell is updated according to the following rules:
+
+* If a cell is a alive:
+  - the cell dies if:
+      * only 1 of the 8 surrounding cells are alive, or
+      * 4 or more of the 8 surrounding cells are alive
+  - the cell remains alive if:
+      * 2 or 3 of the 8 surrounding cells are alive
+* If a cell is dead:
+  - the cell becomes alive if:
+      * exactly 3 or the 8 surrounding cells are alive
+
+We'll start with the most naive way to create this model in R, by looping through each cell in each iteration of the model. First we create the lattice, using a simple matrix. We'll start of the simulation with 40% cells randomly chosen to be alive. We'll make a fairly large lattice (200 x 200) to highlight how slow R can be even for such a simple simulation.
+
+```{r create_lattice}
+nr <- 200
+nc <- 200
+lattice <- matrix(rbinom(nr*nc,1,0.4), nrow = nr, ncol = nc)
+```
+
+And here is out loop-based method:
+
+```{r loop_method, cache=TRUE}
+GoL_loop <- function(lattice, n_it) {
+  lattice <- cbind(0, rbind(0, lattice, 0), 0) ## add buffer of zeroes
+  storage <- array(0, c(nrow(lattice), ncol(lattice), n_it + 1))
+  storage[ , , 1] <- lattice
+  for(n in seq_len(n_it)) {
+    updated_lattice <- lattice
+    for(i in 2:(nrow(lattice) - 1)){
+        for(j in 2:(ncol(lattice) - 1)) {
+          neighbours <- lattice[i + 1, j] +
+            lattice[i - 1, j] +
+            lattice[i, j + 1] + 
+            lattice[i, j - 1] +
+            lattice[i + 1, j + 1] +
+            lattice[i + 1, j - 1] +
+            lattice[i - 1, j + 1] +
+            lattice[i - 1, j - 1]
+          ## apply GoL rules
+          
+          updated_lattice[i, j] <- ifelse(lattice[i, j] == 1,
+                                          ifelse(neighbours < 2 | neighbours > 3, 0, 1),
+                                          ifelse(neighbours == 3, 1, 0))
+          }
+    }   
+    lattice <- updated_lattice
+    storage[ , , n + 1] <- lattice
+  }
+  storage
+}
+start <- Sys.time()
+timed_loop <- system.time(
+test <- GoL_loop(lattice, 100)
+)
+end <- Sys.time()
+timed_loop
+```
+
+```{r make_loop_gif, results='hide'}
+write.gif(test, "test_loop.gif", col="jet", delay=5)
+```
+
+![](test_loop.gif)
+
+So, that looks pretty cool, but it was ridiculously slow. It took `r (end - start)` `r attr(end - start, "units")` to run on my system! That is because every iteration we have to loop through every single cell and update it (that's 200x200 = 4000). I would like to run it for more than 100 iterations but I don't want to wait that long. What can I do? 
+
+#Two Ways to Make Simulations faster in R
+
+Typically there are two main ways of making simulations run faster:
+
+1. Rewrite using R efficiencies
+2. Compile code
+
+First, I'll talk about rewriting code to take advantage of efficiencies in the R language. That is to say, in general, R is inefficient at loops, however, R is not inefficient at everything. Understanding this tends to take a deeper understanding of R's underlying architecture to fully take advantage of. Compiling code usually means rewriting your code in another language that can be compiled such as C, or C++. Compiled languages are generally much faster than R. However, they are usually much more difficult to learn, and don't have all the nice features of R for manipulating and analysing data (and simulations can produce a lot of cool data to manipulate and analyse). Recently, however, it has become possible to take advantage of some of the benefits of compiling wihtout having to leave the warm, conforting embrace of R, and everything Rish. I'll give some examples of that later in this post.
+
+But first let's look at one way we can rewrite our code so that it runs faster in R, using features of R which have been highly optimized.
+
+As an example, we can take advantage of one thing that R is pretty efficient at, and that is doing vectorized operations and matrix math. If we can convert the logic of our model into a set of operations on vectors and matrices, we can substantially increase speeds. The disadvantage of this is that the resulting code is likely to be more difficult to understand, and it sometimes takes a truly convoluted set of operations to recreate a relatively simple simulation. Luckily, in this simple case we can convert our GoL simulation to a set of matrix additions fairly easily. This method was suggested in a [blog post](http://www.petrkeil.com/?p=236) by Petr Keil in 2012. The idea is to simply create 8 matrices in each iteration, which are shifted versions of the original lattice. Then you can simply add them all the matrices together to calculate the number of living neighbours. Like this:
+
+```{r matrix_version}
+GoL_matrix <- function(lattice, n_it) {
+  nr <- nrow(lattice)
+  nc <- ncol(lattice)
+  storage <- array(0, c(nrow(lattice), ncol(lattice), n_it + 1))
+  storage[ , , 1] <- lattice
+  for(n in seq_len(n_it)) {
+    
+    lattice_L <- cbind(lattice[ , -1], 0)
+    lattice_R <- cbind(0, lattice[ , -nc])
+    lattice_U <- rbind(lattice[-1, ], 0)
+    lattice_D <- rbind(0, lattice[-nr, ])
+    lattice_LU <- rbind(cbind(lattice[ , -1], 0)[-1, ], 0)
+    lattice_RU <- rbind(cbind(0, lattice[ , -nc])[-1, ], 0)
+    lattice_LD <- rbind(0, cbind(lattice[ , -1], 0)[-nr, ])
+    lattice_LR <- rbind(0, cbind(0, lattice[ , -nc])[-nr, ])
+    
+    neighbours <- lattice_L + lattice_R + lattice_U + lattice_D +
+      lattice_LU + lattice_RU + lattice_LD + lattice_LR
+    
+    ## apply GoL rules
+    lattice <- ifelse(lattice == 1,
+                      ifelse(neighbours < 2 | neighbours > 3, 0, 1),
+                      ifelse(neighbours == 3, 1, 0))
+    
+    storage[ , , n + 1] <- lattice
+  }
+  storage
+}
+start <- Sys.time()
+timed_matrix <- system.time(
+test <- GoL_matrix(lattice, 100)
+)
+end <- Sys.time()
+timed_matrix
+```
+
+Okay that was way faster! It only took `r (end - start)` `r attr(end - start, "units")` on my system. Okay let's run it for longer.
+
+```{r run_longer}
+test <- GoL_matrix(lattice, 200)
+```
+
+```{r make_matrix_gif, results='hide'}
+write.gif(test, "test_matrix_long.gif", col="jet", delay=5)
+```
+
+![](test_matrix_long.gif)
+Okay, but what if we want to run it for a *really* long time. Can we make this code go even faster? Well, perhaps. Earlier I mentioned than compiling code could make it run faster. Since R is an interpretted language, compiling is normally not available. However, more recent versions of R do include a command that will try and compile R functions for you. The command is `cmpfun` in the `compiler` package (included with base R). I suspect by compiling we can make our first loop-based function run much faster, but that it won't help our second matrix-based function, because that is already as optimized as possible in R. Let's find out shall we?
+
+```{r compile_functions}
+library(compiler)
+GoL_loop_cmp <- cmpfun(GoL_loop)
+start <- Sys.time()
+timed_loop_cmp <- system.time(
+test <- GoL_loop_cmp(lattice, 100)
+)
+end <- Sys.time()
+timed_loop_cmp
+```
+ Okay, so that took `r (end - start)` `r attr(end - start, "units")`, which is quite a bit faster than the first time we tried it, nearly 3 times as fast in fact. It's still not nearly as fast as the matrix method, but you could see how just by using R's compile feature you could save a lot of time. Now that's see what happens if we compile the matrix function.
+ 
+```{r compile_matrix}
+GoL_matrix_cmp <- cmpfun(GoL_matrix)
+start <- Sys.time()
+timed_matrix_cmp <- system.time(
+test <- GoL_matrix_cmp(lattice, 100)
+)
+end <- Sys.time()
+timed_matrix_cmp
+```
+
+Okay, so as expected, we didn't really see any speedup when we compiled the matrix method. It looks like that is about as fast as it gets! So when using the compiler in R, we can get advantages if our original code is relatively inefficient (e.g. uses a lot of looping). Another limitation of compilation in R is that it will usually only work well if you mostly only use simple mathematical functions in your function. If you use a lot of more complicated functions from external functions for example, R's compiler is unlikely to be able to compile your function effectively. With trial and error it is possible to get a better feel for when a function can be improved in this way.
+
+But is there any other option if you want more speed. Should you give in and learn C++? Or perhaps Julia (which combined some of the ease of use of R, with the speed being closer to C and family)? Well, perhaps, but there is another option in R which has emerged quite recently. This is made possible by a new R package known as [`nimble`](https://r-nimble.org/). Nimble is its own programming language that can be imbedded in R, which is mainly meant for programming sophisticated statistical models (similarly to OpenBUGS, JAGS, or Stan). However, it provides a feature that could be of use far beyond statistical models. It allows the translation and compilation of functions written in R syntax into C++ code, which it calls `nimbleFunctions`. Unfortunately, only a small subset of the R language has been made available in the `nimble` language, but if your simulation is simple enough to be programmed using this subset, this could offer a way to substantially boost speed without having to learn a new language (except for the elements of `nimble` itself which differ very slightly from R in a few cases).
+
+Let's see if we can make our GoL simulation into a `nimbleFunction`. The biggest difference with `nimble` compared with typical R syntax is that you must declar the variable type of function inputs and outputs.
+
+```{r nimble_attempt}
+library(nimble)
+GoL_nimble <- nimbleFunction(
+  setup = function(lattice, n_it, nr, nc) {
+    lattice <- lattice
+    n_it <- n_it
+    storage <- array(0, c(nr, nc, n_it + 1))
+  },
+  run = function() {
+    #lattice <- cbind(0, rbind(0, lattice, 0), 0) ## add buffer of zeroes
+    #storage <- array(0, c(nrow(lattice), ncol(lattice), n_it + 1))
+    storage[ , , 1] <<- lattice
+    for(n in 1:n_it) {
+      updated_lattice <- lattice
+      for(i in 2:(nr - 1)){
+          for(j in 2:(nc - 1)) {
+            neighbours <- lattice[i + 1, j] +
+              lattice[i - 1, j] +
+              lattice[i, j + 1] + 
+              lattice[i, j - 1] +
+              lattice[i + 1, j + 1] +
+              lattice[i + 1, j - 1] +
+              lattice[i - 1, j + 1] +
+              lattice[i - 1, j - 1]
+            ## apply GoL rules
+          
+            if(lattice[i, j] == 1) {
+              if(neighbours < 2 | neighbours > 3) {
+                updated_lattice[i, j] <- 0  
+              } else {
+                if(neighbours == 3) {
+                  updated_lattice[i, j] <- 1
+                }
+              }
+            } 
+              
+              #ifelse(lattice[i, j] == 1,
+              #                              ifelse(neighbours < 2 | neighbours > 3, 0, 1),
+              #                              ifelse(neighbours == 3, 1, 0))
+            }
+      }   
+      lattice <<- updated_lattice
+      storage[ , , n + 1] <<- lattice
+    }
+    #storage
+    #returnType(integer(3))
+  }
+)
+
+nimble_lattice <- cbind(0, rbind(0, lattice, 0), 0) ## add buffer of zeroes
+test_nimble <- GoL_nimble(nimble_lattice, 100, nrow(nimble_lattice), ncol(nimble_lattice))
+
+GoL_nimble_cmp <- compileNimble(test_nimble, showCompilerOutput = TRUE)
+
+GoL_nimble_cmp$run()
+
+write.gif(GoL_nimble_cmp$storage, "test_nimble.gif", col="jet", delay=5)
+
+```
