@@ -6,7 +6,7 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
 library(caTools)
 ```
 
@@ -71,7 +71,7 @@ end <- Sys.time()
 timed_loop
 ```
 
-```{r make_loop_gif, results='hide'}
+```{r make_loop_gif, results='hide', echo = FALSE}
 write.gif(test, "test_loop.gif", col="jet", delay=5)
 ```
 
@@ -135,11 +135,12 @@ Okay that was way faster! It only took `r (end - start)` `r attr(end - start, "u
 test <- GoL_matrix(lattice, 200)
 ```
 
-```{r make_matrix_gif, results='hide'}
+```{r make_matrix_gif, results='hide', echo = FALSE}
 write.gif(test, "test_matrix_long.gif", col="jet", delay=5)
 ```
 
 ![](test_matrix_long.gif)
+
 Okay, but what if we want to run it for a *really* long time. Can we make this code go even faster? Well, perhaps. Earlier I mentioned than compiling code could make it run faster. Since R is an interpretted language, compiling is normally not available. However, more recent versions of R do include a command that will try and compile R functions for you. The command is `cmpfun` in the `compiler` package (included with base R). I suspect by compiling we can make our first loop-based function run much faster, but that it won't help our second matrix-based function, because that is already as optimized as possible in R. Let's find out shall we?
 
 ```{r compile_functions}
@@ -152,6 +153,7 @@ test <- GoL_loop_cmp(lattice, 100)
 end <- Sys.time()
 timed_loop_cmp
 ```
+
  Okay, so that took `r (end - start)` `r attr(end - start, "units")`, which is quite a bit faster than the first time we tried it, nearly 3 times as fast in fact. It's still not nearly as fast as the matrix method, but you could see how just by using R's compile feature you could save a lot of time. Now that's see what happens if we compile the matrix function.
  
 ```{r compile_matrix}
@@ -168,7 +170,7 @@ Okay, so as expected, we didn't really see any speedup when we compiled the matr
 
 But is there any other option if you want more speed. Should you give in and learn C++? Or perhaps Julia (which combined some of the ease of use of R, with the speed being closer to C and family)? Well, perhaps, but there is another option in R which has emerged quite recently. This is made possible by a new R package known as [`nimble`](https://r-nimble.org/). Nimble is its own programming language that can be imbedded in R, which is mainly meant for programming sophisticated statistical models (similarly to OpenBUGS, JAGS, or Stan). However, it provides a feature that could be of use far beyond statistical models. It allows the translation and compilation of functions written in R syntax into C++ code, which it calls `nimbleFunctions`. Unfortunately, only a small subset of the R language has been made available in the `nimble` language, but if your simulation is simple enough to be programmed using this subset, this could offer a way to substantially boost speed without having to learn a new language (except for the elements of `nimble` itself which differ very slightly from R in a few cases).
 
-Let's see if we can make our GoL simulation into a `nimbleFunction`. The biggest difference with `nimble` compared with typical R syntax is that you must declar the variable type of function inputs and outputs.
+Let's see if we can make our GoL simulation into a `nimbleFunction`. 
 
 ```{r nimble_attempt}
 library(nimble)
@@ -179,8 +181,7 @@ GoL_nimble <- nimbleFunction(
     storage <- array(0, c(nr, nc, n_it + 1))
   },
   run = function() {
-    #lattice <- cbind(0, rbind(0, lattice, 0), 0) ## add buffer of zeroes
-    #storage <- array(0, c(nrow(lattice), ncol(lattice), n_it + 1))
+   
     storage[ , , 1] <<- lattice
     for(n in 1:n_it) {
       updated_lattice <- lattice
@@ -224,9 +225,32 @@ test_nimble <- GoL_nimble(nimble_lattice, 100, nrow(nimble_lattice), ncol(nimble
 
 GoL_nimble_cmp <- compileNimble(test_nimble, showCompilerOutput = TRUE)
 
+start <- Sys.time()
 timed_nimble <- system.time(GoL_nimble_cmp$run())
+end <- Sys.time()
 timed_nimble
+```
 
-write.gif(GoL_nimble_cmp$storage, "test_nimble.gif", col="jet", delay=5)
+
+Wow! That took only `r end - start` `r attr(end - start, "units")`! That's over 18 times faster than our most efficient matrix-based R code. Just to convince ourselves that that worked the way it should, let's look at a gif of the output, and while we're at it, time a longer sim. Note that I a not including the compilation time here, as that is just a one-time time cost, so it doesn't have an effect when we want to run a simulation many times (which we usually do).
+
+```{r long_nimble_sim}
+test_nimble2 <- GoL_nimble(nimble_lattice, 500, nrow(nimble_lattice), ncol(nimble_lattice))
+
+GoL_nimble_cmp2 <- compileNimble(test_nimble2, showCompilerOutput = TRUE)
+
+start <- Sys.time()
+timed_nimble2 <- system.time(GoL_nimble_cmp2$run())
+timed_nimble2
+```
+
+``` {r nimble_gif, results = 'hide', echo = FALSE, cache = FALSE}
+write.gif(GoL_nimble_cmp2$storage, "test_nimble.gif", col="jet", delay=1)
 
 ```
+
+![](test_nimble.gif)
+
+
+To understand how the `nimbleFunction` works, let's dive a little more into the details of the function I wrote above.
+
